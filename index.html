@@ -50,6 +50,7 @@
 
     // ====================== STATE ======================
     let gapiInited = false, gisInited = false, tokenClient;
+    let accessToken = null;
     let userData = {
       year: new Date().getFullYear(),
       month: new Date().getMonth(),
@@ -96,14 +97,15 @@
         client_id: CLIENT_ID,
         scope: SCOPES,
         callback: (tokenResponse) => {
-          if (tokenResponse.access_token) {
-            loadDataFromDrive();
-            document.getElementById('saveBtn').disabled = false;
-            updateStatus('Connected to Drive');
-          } else {
-            updateStatus('Auth failed - check console');
-          }
-        },
+  if (tokenResponse && tokenResponse.access_token) {
+    accessToken = tokenResponse.access_token;
+    document.getElementById('saveBtn').disabled = false;
+    updateStatus('Connected – ready to save');
+    loadDataFromDrive();
+  } else {
+    updateStatus('Connection failed');
+  }
+},
       });
       gisInited = true;
       maybeEnableButtons();
@@ -118,7 +120,7 @@
 
     // ====================== DRIVE FUNCTIONS ======================
     async function loadDataFromDrive() {
-      if (!gapi || !gapi.client || !gapi.client.getToken()) return loadLocal();
+      if (!accessToken) return loadLocal();
       try {
         const response = await gapi.client.drive.files.list({
           q: "name='NishenBudgetData.json' and trashed=false",
@@ -146,33 +148,49 @@
     }
 
     async function saveToDrive() {
-      if (!gapi.client.getToken()) return alert('Connect to Drive first in Settings!');
-      const dataStr = JSON.stringify(userData, null, 2);
-      const metadata = { name: 'NishenBudgetData.json', mimeType: 'application/json' };
-      const form = new FormData();
-      form.append('metadata', new Blob([JSON.stringify(metadata)], {type: 'application/json'}));
-      form.append('file', new Blob([dataStr], {type: 'application/json'}));
+  if (!accessToken) return alert('Connect to Google Drive first!');
 
-      try {
-        const listResponse = await gapi.client.drive.files.list({ q: "name='NishenBudgetData.json'" });
-        if (listResponse.result.files.length > 0) {
-          await gapi.client.drive.files.update({
-            fileId: listResponse.result.files[0].id,
-            media: { mimeType: 'application/json', body: dataStr }
-          });
-        } else {
-          await gapi.client.drive.files.create({
-            resource: metadata,
-            media: { mimeType: 'application/json', body: new Blob([dataStr]) },
-            fields: 'id'
-          });
-        }
-        updateStatus('Saved to Drive!');
-      } catch (e) {
-        console.error('Save failed:', e);
-        updateStatus('Save failed - check internet/Client ID');
-      }
+  const boundary = '-------314159265358979323846';
+  const delimiter = "\r\n--" + boundary + "\r\n";
+  const close_delim = "\r\n--" + boundary + "--";
+
+  const metadata = { name: 'NishenBudgetData.json', mimeType: 'application/json' };
+  const content = JSON.stringify(userData, null, 2);
+
+  const body = delimiter + 'Content-Type: application/json\r\n\r\n' + JSON.stringify(metadata) + delimiter +
+               'Content-Type: application/json\r\n\r\n' + content + close_delim;
+
+  try {
+    const list = await gapi.client.drive.files.list({ q: "name='NishenBudgetData.json'" });
+    let url, method;
+    if (list.result.files?.length > 0) {
+      url = `https://www.googleapis.com/upload/drive/v3/files/${list.result.files[0].id}?uploadType=multipart`;
+      method = 'PATCH';
+    } else {
+      url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart';
+      method = 'POST';
     }
+
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'Authorization': 'Bearer ' + accessToken,
+        'Content-Type': 'multipart/related; boundary=' + boundary
+      },
+      body
+    });
+
+    if (response.ok) {
+      updateStatus('Saved to Google Drive!');
+      saveLocal();
+    } else {
+      updateStatus('Save failed: ' + response.status);
+    }
+  } catch (e) {
+    updateStatus('Save error – check console');
+    console.error(e);
+  }
+}
 
     function updateStatus(msg) {
       let statusEl = document.getElementById('status');
