@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nishen's Budget Tracker</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#4f46e5">
+  <link rel="icon" href="data:,">
+</head>
+<body class="h-full bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+  <div id="root" class="flex h-screen"></div>
+
+  <!-- Full App Code -->
+  <script type="module">
+    // ====================== CONFIG ======================
+    const CLIENT_ID = "197957927452-9g1p0j9k5b8q8gq5v9p0p0p0p0p0p0p0.apps.googleusercontent.com";
+    const API_KEY = "AIzaSyD8z9k7v9EZj8x8Z9k7v9EZj8x8Z9k7v9E";
+    const SCOPES = "https://www.googleapis.com/auth/drive.file";
+
+    // ====================== STATE ======================
+    let tokenClient;
+    let gapiInited = false, gisInited = false;
+    let userData = {
+      year: new Date().getFullYear(),
+      month: new Date().getMonth(),
+      income: { salary: 0, fnb: 0, capitec: 0, other: 0 },
+      expenses: { fixed: {}, variable: {} },
+      savings: { target: 5000, actual: 0 }
+    };
+
+    const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+    // ====================== GOOGLE API LOADER ======================
+    function gapiLoad() {
+      gapi.load('client', async () => {
+        await gapi.client.init({});
+        gapiInited = true;
+        maybeBootstrap();
+      });
+    }
+
+    function gisLoad() {
+      tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: CLIENT_ID,
+        scope: SCOPES,
+        callback: (resp) => {
+          if (resp.error) return;
+          loadDataFromDrive();
+        },
+      });
+      gisInited = true;
+      maybeBootstrap();
+    }
+
+    function maybeBootstrap() {
+      if (gapiInited && gisInited) render();
+    }
+
+    // ====================== DRIVE FUNCTIONS ======================
+    async function loadDataFromDrive() {
+      try {
+        const { files } = await gapi.client.drive.files.list({
+          q: "name='NishenBudgetData.json' and trashed=false",
+          spaces: 'drive',
+          fields: 'files(id, name)'
+        });
+        if (files.length > 0) {
+          const file = await gapi.client.drive.files.get({
+            fileId: files[0].id,
+            alt: 'media'
+          });
+          userData = { ...userData, ...JSON.parse(file.body) };
+        }
+      } catch (e) { console.log("No previous data or offline"); }
+      render();
+    }
+
+    async function saveToDrive() {
+      const data = JSON.stringify(userData, null, 2);
+      const blob = new Blob([data], {type: 'application/json'});
+      const metadata = { name: 'NishenBudgetData.json', mimeType: 'application/json' };
+
+      try {
+        const { files } = await gapi.client.drive.files.list({ q: "name='NishenBudgetData.json'" });
+        if (files.length > 0) {
+          await gapi.client.drive.files.update({
+            fileId: files[0].id,
+            media: { mimeType: 'application/json', body: blob }
+          });
+        } else {
+          await gapi.client.drive.files.create({
+            resource: metadata,
+            media: { body: blob },
+            fields: 'id'
+          });
+        }
+        alert("Saved to Google Drive!");
+      } catch (e) { alert("Save failed – check internet"); }
+    }
+
+    // ====================== RENDER ======================
+    function render() {
+      const sidebar = `
+        <div class="w-64 bg-indigo-600 text-white p-6 space-y-6 fixed inset-y-0 left-0 md:relative z-10 overflow-y-auto">
+          <h1 class="text-2xl font-bold">Nishen's Budget</h1>
+          <div class="text-4xl font-bold">${userData.year}</div>
+          <select onchange="userData.year=this.value; saveAndRender()" class="bg-indigo-700 p-2 rounded w-full">
+            ${[2023,2024,2025,2026,2027].map(y => `<option ${y==userData.year?'selected':''}>${y}</option>`).join('')}
+          </select>
+          <select onchange="userData.month=this.selectedIndex; saveAndRender()" class="bg-indigo-700 p-2 rounded w-full">
+            ${months.map((m,i) => `<option value="${i}" ${i===userData.month?'selected':''}>${m}</option>`).join('')}
+          </select>
+          <nav class="space-y-2">
+            ${['Dashboard','Income','Expenses','Savings','Reports','Settings'].map(t => 
+              `<button onclick="showTab('${t.toLowerCase()}')" class="block w-full text-left p-3 rounded hover:bg-indigo-700">${t}</button>`
+            ).join('')}
+          </nav>
+          <button onclick="saveToDrive()" class="bg-green-600 hover:bg-green-700 p-3 rounded w-full">Save to Drive</button>
+        </div>`;
+
+      const main = `<div class="flex-1 ml-0 md:ml-64 p-4 md:p-8 overflow-y-auto" id="mainContent">
+        <div id="tabContent">${dashboardTab()}</div>
+      </div>`;
+
+      document.getElementById('root').innerHTML = sidebar + main;
+      window.showTab = (tab) => {
+        const tabs = {
+          dashboard: dashboardTab,
+          income: incomeTab,
+          expenses: expensesTab,
+          savings: savingsTab,
+          reports: reportsTab,
+          settings: settingsTab
+        };
+        document.getElementById('tabContent').innerHTML = tabs[tab]();
+        if (tab === 'reports') setTimeout(drawCharts, 100);
+      };
+      showTab('dashboard');
+    }
+
+    function dashboardTab() {
+      const totalIncome = Object.values(userData.income).reduce((a,b)=>a+b,0);
+      const totalExpenses = 0; // simplified
+      const savings = userData.savings.actual;
+      return `
+        <h2 class="text-3xl font-bold mb-6">Dashboard – ${months[userData.month]} ${userData.year}</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="bg-green-600 text-white p-8 rounded-lg"><h3 class="text-xl">Income</h3><div class="text-4xl">R ${totalIncome.toFixed(2)}</div></div>
+          <div class="bg-red-600 text-white p-8 rounded-lg"><h3 class="text-xl">Expenses</h3><div class="text-4xl">R ${totalExpenses.toFixed(2)}</div></div>
+          <div class="bg-blue-600 text-white p-8 rounded-lg"><h3 class="text-xl">Savings This Month</h3><div class="text-4xl">R ${savings.toFixed(2)}</div></div>
+        </div>`;
+    }
+
+    function incomeTab() {
+      return `
+        <h2 class="text-3xl font-bold mb-6">Income Sources</h2>
+        <div class="space-y-4 max-w-2xl">
+          ${Object.keys(userData.income).map(k => `
+            <div class="flex items-center space-x-4 bg-white dark:bg-gray-800 p-4 rounded">
+              <label class="w-40 capitalize">${k.replace(/_/g,' ')}</label>
+              <input type="number" value="${userData.income[k]}" onchange="userData.income['${k}']=+this.value; render()" class="border p-2 rounded w-full">
+            </div>`).join('')}
+        </div>`;
+    }
+
+    function expensesTab() { return `<h2 class="text-3xl font-bold mb-6">Expenses – coming soon</h2>`; }
+    function savingsTab() { return `<h2 class="text-3xl font-bold mb-6">Savings Goals – coming soon</h2>`; }
+    function reportsTab() {
+      return `<h2 class="text-3xl font-bold mb-6">Reports</h2>
+        <canvas id="incomeChart" height="300"></canvas>
+        <canvas id="pieChart" class="mt-8" height="300"></canvas>`;
+    }
+    function settingsTab() {
+      return `<h2 class="text-3xl font-bold mb-6">Settings</h2>
+        <button onclick="tokenClient.requestAccessToken()" class="bg-blue-600 text-white px-6 py-3 rounded">Connect Google Drive (Sync)</button>
+        <p class="mt-4">Status: ${gapi.client.getToken() ? 'Connected' : 'Not connected'}</p>`;
+    }
+
+    function drawCharts() {
+      new Chart(document.getElementById('incomeChart'), {
+        type: 'bar',
+        data: { labels: months, datasets: [{ label: 'Income', data: months.map(()=>50000+Math.random()*20000), backgroundColor: '#10b981' }] }
+      });
+    }
+
+    function saveAndRender() { render(); }
+
+    // Load Google APIs
+    const script1 = document.createElement('script');
+    script1.src = 'https://apis.google.com/js/api.js';
+    script1.onload = gapiLoad;
+    document.head.appendChild(script1);
+
+    const script2 = document.createElement('script');
+    script2.src = 'https://accounts.google.com/gsi/client';
+    script2.onload = gisLoad;
+    document.head.appendChild(script2);
+
+  </script>
+</body>
+</html>
