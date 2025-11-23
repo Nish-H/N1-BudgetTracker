@@ -9,196 +9,395 @@
   <link rel="manifest" href="manifest.json">
   <meta name="theme-color" content="#4f46e5">
   <link rel="icon" href="data:,">
+  <script src="https://apis.google.com/js/api.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body class="h-full bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100">
-  <div id="root" class="flex h-screen"></div>
+  <div id="root" class="flex h-screen relative">
+    <!-- Mobile menu button -->
+    <button id="mobileMenuBtn" class="md:hidden fixed top-4 left-4 z-20 p-2 bg-indigo-600 text-white rounded">☰</button>
+    
+    <!-- Sidebar -->
+    <div id="sidebar" class="w-64 bg-indigo-600 text-white p-6 space-y-6 fixed inset-y-0 left-0 transform -translate-x-full md:translate-x-0 transition-transform z-10 overflow-y-auto">
+      <h1 class="text-2xl font-bold">Nishen's Budget</h1>
+      <div class="text-4xl font-bold">${userData.year}</div>
+      <select id="yearSelect" class="bg-indigo-700 p-2 rounded w-full text-white"></select>
+      <select id="monthSelect" class="bg-indigo-700 p-2 rounded w-full text-white"></select>
+      <nav class="space-y-2">
+        ${['Dashboard','Income','Expenses','Savings','Reports','Settings'].map(t => 
+          `<button onclick="showTab('${t.toLowerCase()}')" class="block w-full text-left p-3 rounded hover:bg-indigo-700">${t}</button>`
+        ).join('')}
+      </nav>
+      <button onclick="saveToDrive()" id="saveBtn" class="bg-green-600 hover:bg-green-700 p-3 rounded w-full" disabled>Save to Drive</button>
+    </div>
+    
+    <!-- Overlay for mobile -->
+    <div id="overlay" class="fixed inset-0 bg-black opacity-50 z-5 hidden md:hidden"></div>
+    
+    <!-- Main Content -->
+    <div class="flex-1 ml-0 md:ml-64 p-4 md:p-8 overflow-y-auto" id="mainContent">
+      <div id="tabContent">Loading...</div>
+    </div>
+  </div>
 
-  <!-- Full App Code -->
   <script type="module">
     // ====================== CONFIG ======================
-    const CLIENT_ID = "197957927452-9g1p0j9k5b8q8gq5v9p0p0p0p0p0p0p0.apps.googleusercontent.com";
-    const API_KEY = "AIzaSyD8z9k7v9EZj8x8Z9k7v9EZj8x8Z9k7v9E";
+    const CLIENT_ID = "525866973256-sm8gpped3p1kvghkvahcovnppfr7bi1d.apps.googleusercontent.com"; // Replace with your Google Cloud Client ID
+    const API_KEY = "AIzaSyD8z9k7v9EZj8x8Z9k7v9EZj8x8Z9k7v9E"; // Placeholder - use your API key if needed
     const SCOPES = "https://www.googleapis.com/auth/drive.file";
+    const DISCOVERY_DOC = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
 
     // ====================== STATE ======================
-    let tokenClient;
-    let gapiInited = false, gisInited = false;
+    let gapiInited = false, gisInited = false, tokenClient;
     let userData = {
       year: new Date().getFullYear(),
       month: new Date().getMonth(),
       income: { salary: 0, fnb: 0, capitec: 0, other: 0 },
-      expenses: { fixed: {}, variable: {} },
-      savings: { target: 5000, actual: 0 }
+      expenses: { fixed: { rent: { budget: 0, actual: 0 }, utilities: { budget: 0, actual: 0 } }, variable: { food: { budget: 0, actual: 0 }, transport: { budget: 0, actual: 0 } } },
+      savings: { target: 5000, actual: 0, categories: [] }
     };
-
     const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
-    // ====================== GOOGLE API LOADER ======================
+    // LocalStorage fallback
+    function loadLocal() {
+      const saved = localStorage.getItem('nishenBudget');
+      if (saved) userData = { ...userData, ...JSON.parse(saved) };
+    }
+    function saveLocal() { localStorage.setItem('nishenBudget', JSON.stringify(userData)); }
+
+    loadLocal();
+
+    // ====================== GOOGLE INIT ======================
     function gapiLoad() {
       gapi.load('client', async () => {
-        await gapi.client.init({});
+        await gapi.client.init({
+          apiKey: API_KEY,
+          discoveryDocs: [DISCOVERY_DOC],
+        });
         gapiInited = true;
-        maybeBootstrap();
+        maybeEnableButtons();
       });
     }
 
     function gisLoad() {
+      if (!CLIENT_ID || CLIENT_ID === "YOUR_CLIENT_ID_HERE") {
+        alert("Please set your CLIENT_ID in the code for Drive sync!");
+        return;
+      }
       tokenClient = google.accounts.oauth2.initTokenClient({
         client_id: CLIENT_ID,
         scope: SCOPES,
-        callback: (resp) => {
-          if (resp.error) return;
-          loadDataFromDrive();
+        callback: (tokenResponse) => {
+          if (tokenResponse.access_token) {
+            loadDataFromDrive();
+            document.getElementById('saveBtn').disabled = false;
+            updateStatus('Connected to Drive');
+          }
         },
       });
       gisInited = true;
-      maybeBootstrap();
+      maybeEnableButtons();
     }
 
-    function maybeBootstrap() {
+    function maybeEnableButtons() {
       if (gapiInited && gisInited) render();
     }
 
     // ====================== DRIVE FUNCTIONS ======================
     async function loadDataFromDrive() {
+      if (!gapi.client.getToken()) return loadLocal();
       try {
-        const { files } = await gapi.client.drive.files.list({
+        const response = await gapi.client.drive.files.list({
           q: "name='NishenBudgetData.json' and trashed=false",
           spaces: 'drive',
           fields: 'files(id, name)'
         });
-        if (files.length > 0) {
-          const file = await gapi.client.drive.files.get({
-            fileId: files[0].id,
+        if (response.result.files.length > 0) {
+          const file = response.result.files[0];
+          const fileContent = await gapi.client.drive.files.get({
+            fileId: file.id,
             alt: 'media'
           });
-          userData = { ...userData, ...JSON.parse(file.body) };
+          userData = { ...userData, ...JSON.parse(fileContent.body) };
+          saveLocal();
+          render();
+          updateStatus('Loaded from Drive');
+        } else {
+          updateStatus('No Drive file found - using local');
         }
-      } catch (e) { console.log("No previous data or offline"); }
-      render();
+      } catch (e) {
+        console.error('Load failed:', e);
+        updateStatus('Load failed - offline mode');
+        loadLocal();
+        render();
+      }
     }
 
     async function saveToDrive() {
-      const data = JSON.stringify(userData, null, 2);
-      const blob = new Blob([data], {type: 'application/json'});
+      if (!gapi.client.getToken()) return alert('Connect to Drive first!');
+      const dataStr = JSON.stringify(userData, null, 2);
+      const blob = new Blob([dataStr], {type: 'application/json'});
       const metadata = { name: 'NishenBudgetData.json', mimeType: 'application/json' };
+      const form = new FormData();
+      form.append('metadata', new Blob([JSON.stringify(metadata)], {type: 'application/json'}));
+      form.append('file', blob);
 
       try {
-        const { files } = await gapi.client.drive.files.list({ q: "name='NishenBudgetData.json'" });
-        if (files.length > 0) {
-          await gapi.client.drive.files.update({
-            fileId: files[0].id,
-            media: { mimeType: 'application/json', body: blob }
+        const response = await gapi.client.drive.files.list({ q: "name='NishenBudgetData.json'" });
+        if (response.result.files.length > 0) {
+          await gapi.client.request({
+            path: `/upload/drive/v3/files/${response.result.files[0].id}`,
+            method: 'PATCH',
+            params: { uploadType: 'media' },
+            body: blob
           });
         } else {
-          await gapi.client.drive.files.create({
-            resource: metadata,
-            media: { body: blob },
-            fields: 'id'
+          await gapi.client.request({
+            path: '/upload/drive/v3/files',
+            method: 'POST',
+            params: { uploadType: 'multipart' },
+            headers: { 'Content-Type': 'application/json' },
+            body: form
           });
         }
-        alert("Saved to Google Drive!");
-      } catch (e) { alert("Save failed – check internet"); }
+        updateStatus('Saved to Drive!');
+      } catch (e) {
+        console.error('Save failed:', e);
+        updateStatus('Save failed - check connection');
+      }
+    }
+
+    function updateStatus(msg) {
+      const statusEl = document.querySelector('#status') || document.createElement('p');
+      statusEl.textContent = `Drive Status: ${msg}`;
+      statusEl.id = 'status';
+      if (!document.querySelector('#status')) document.querySelector('#settingsTab').prepend(statusEl);
     }
 
     // ====================== RENDER ======================
     function render() {
-      const sidebar = `
-        <div class="w-64 bg-indigo-600 text-white p-6 space-y-6 fixed inset-y-0 left-0 md:relative z-10 overflow-y-auto">
-          <h1 class="text-2xl font-bold">Nishen's Budget</h1>
-          <div class="text-4xl font-bold">${userData.year}</div>
-          <select onchange="userData.year=this.value; saveAndRender()" class="bg-indigo-700 p-2 rounded w-full">
-            ${[2023,2024,2025,2026,2027].map(y => `<option ${y==userData.year?'selected':''}>${y}</option>`).join('')}
-          </select>
-          <select onchange="userData.month=this.selectedIndex; saveAndRender()" class="bg-indigo-700 p-2 rounded w-full">
-            ${months.map((m,i) => `<option value="${i}" ${i===userData.month?'selected':''}>${m}</option>`).join('')}
-          </select>
-          <nav class="space-y-2">
-            ${['Dashboard','Income','Expenses','Savings','Reports','Settings'].map(t => 
-              `<button onclick="showTab('${t.toLowerCase()}')" class="block w-full text-left p-3 rounded hover:bg-indigo-700">${t}</button>`
-            ).join('')}
-          </nav>
-          <button onclick="saveToDrive()" class="bg-green-600 hover:bg-green-700 p-3 rounded w-full">Save to Drive</button>
-        </div>`;
+      // Populate selects
+      document.getElementById('yearSelect').innerHTML = [2023,2024,2025,2026,2027].map(y => `<option ${y==userData.year?'selected':''}>${y}</option>`).join('');
+      document.getElementById('monthSelect').innerHTML = months.map((m,i) => `<option ${i==userData.month?'selected':''}>${m}</option>`).join('');
+      document.getElementById('yearSelect').onchange = () => { userData.year = +this.value; saveLocal(); render(); };
+      document.getElementById('monthSelect').onchange = () => { userData.month = this.selectedIndex; saveLocal(); render(); };
 
-      const main = `<div class="flex-1 ml-0 md:ml-64 p-4 md:p-8 overflow-y-auto" id="mainContent">
-        <div id="tabContent">${dashboardTab()}</div>
-      </div>`;
+      const sidebar = document.getElementById('sidebar'); // Already in DOM
+      const main = document.getElementById('mainContent');
+      main.innerHTML = `<div id="tabContent">${dashboardTab()}</div>`;
 
-      document.getElementById('root').innerHTML = sidebar + main;
+      // Mobile menu
+      document.getElementById('mobileMenuBtn').onclick = () => {
+        sidebar.classList.toggle('-translate-x-full');
+        document.getElementById('overlay').classList.toggle('hidden');
+      };
+      document.getElementById('overlay').onclick = () => {
+        sidebar.classList.add('-translate-x-full');
+        document.getElementById('overlay').classList.add('hidden');
+      };
+
       window.showTab = (tab) => {
-        const tabs = {
-          dashboard: dashboardTab,
-          income: incomeTab,
-          expenses: expensesTab,
-          savings: savingsTab,
-          reports: reportsTab,
-          settings: settingsTab
-        };
+        const tabs = { dashboard: dashboardTab, income: incomeTab, expenses: expensesTab, savings: savingsTab, reports: reportsTab, settings: settingsTab };
         document.getElementById('tabContent').innerHTML = tabs[tab]();
         if (tab === 'reports') setTimeout(drawCharts, 100);
       };
       showTab('dashboard');
+
+      // Auto-save
+      setInterval(saveLocal, 30000);
     }
 
     function dashboardTab() {
       const totalIncome = Object.values(userData.income).reduce((a,b)=>a+b,0);
-      const totalExpenses = 0; // simplified
+      const totalExpenses = Object.values(userData.expenses.fixed).reduce((cat) => cat.actual + cat.budget, 0) + Object.values(userData.expenses.variable).reduce((cat) => cat.actual + cat.budget, 0);
       const savings = userData.savings.actual;
+      const variance = totalIncome - totalExpenses - savings;
       return `
         <h2 class="text-3xl font-bold mb-6">Dashboard – ${months[userData.month]} ${userData.year}</h2>
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div class="bg-green-600 text-white p-8 rounded-lg"><h3 class="text-xl">Income</h3><div class="text-4xl">R ${totalIncome.toFixed(2)}</div></div>
-          <div class="bg-red-600 text-white p-8 rounded-lg"><h3 class="text-xl">Expenses</h3><div class="text-4xl">R ${totalExpenses.toFixed(2)}</div></div>
-          <div class="bg-blue-600 text-white p-8 rounded-lg"><h3 class="text-xl">Savings This Month</h3><div class="text-4xl">R ${savings.toFixed(2)}</div></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
+          <div class="bg-green-50 dark:bg-green-900/20 p-6 rounded-lg border-l-4 border-green-400">
+            <h3 class="text-lg font-semibold text-green-800 dark:text-green-200">Total Income</h3>
+            <div class="text-3xl font-bold text-green-600 dark:text-green-400">R ${totalIncome.toFixed(2)}</div>
+          </div>
+          <div class="bg-red-50 dark:bg-red-900/20 p-6 rounded-lg border-l-4 border-red-400">
+            <h3 class="text-lg font-semibold text-red-800 dark:text-red-200">Total Expenses</h3>
+            <div class="text-3xl font-bold text-red-600 dark:text-red-400">R ${totalExpenses.toFixed(2)}</div>
+          </div>
+          <div class="bg-blue-50 dark:bg-blue-900/20 p-6 rounded-lg border-l-4 border-blue-400">
+            <h3 class="text-lg font-semibold text-blue-800 dark:text-blue-200">Savings</h3>
+            <div class="text-3xl font-bold text-blue-600 dark:text-blue-400">R ${savings.toFixed(2)}</div>
+          </div>
+          <div class="bg-yellow-50 dark:bg-yellow-900/20 p-6 rounded-lg border-l-4 border-yellow-400">
+            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200">Variance</h3>
+            <div class="text-3xl font-bold ${variance >= 0 ? 'text-green-600' : 'text-red-600'}">R ${variance.toFixed(2)}</div>
+          </div>
+        </div>
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+          <h3 class="text-xl font-bold mb-4">Quick Tips</h3>
+          <p>${variance >= 0 ? 'Great job! You're on track.' : 'Consider cutting expenses.'}</p>
         </div>`;
     }
 
     function incomeTab() {
       return `
         <h2 class="text-3xl font-bold mb-6">Income Sources</h2>
-        <div class="space-y-4 max-w-2xl">
-          ${Object.keys(userData.income).map(k => `
-            <div class="flex items-center space-x-4 bg-white dark:bg-gray-800 p-4 rounded">
-              <label class="w-40 capitalize">${k.replace(/_/g,' ')}</label>
-              <input type="number" value="${userData.income[k]}" onchange="userData.income['${k}']=+this.value; render()" class="border p-2 rounded w-full">
-            </div>`).join('')}
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow max-w-2xl space-y-4">
+          ${Object.entries(userData.income).map(([k, v]) => `
+            <div class="flex items-center space-x-4">
+              <label class="w-32 font-semibold capitalize">${k.replace(/([A-Z])/g, ' $1').trim()}</label>
+              <input type="number" step="0.01" value="${v}" onchange="userData.income['${k}'] = +this.value || 0; saveLocal(); render();" 
+                     class="flex-1 border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500" placeholder="Enter amount">
+            </div>
+          `).join('')}
+          <div class="pt-4 border-t">
+            <div class="text-xl font-bold">Total: R ${Object.values(userData.income).reduce((a,b)=>a+b,0).toFixed(2)}</div>
+          </div>
         </div>`;
     }
 
-    function expensesTab() { return `<h2 class="text-3xl font-bold mb-6">Expenses – coming soon</h2>`; }
-    function savingsTab() { return `<h2 class="text-3xl font-bold mb-6">Savings Goals – coming soon</h2>`; }
+    function expensesTab() {
+      const fixedTotal = Object.values(userData.expenses.fixed).reduce((sum, cat) => sum + cat.actual + cat.budget, 0);
+      const variableTotal = Object.values(userData.expenses.variable).reduce((sum, cat) => sum + cat.actual + cat.budget, 0);
+      return `
+        <h2 class="text-3xl font-bold mb-6">Expense Categories</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+          <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+            <h3 class="text-2xl font-bold mb-4">Fixed Expenses (Total: R ${fixedTotal.toFixed(2)})</h3>
+            ${Object.entries(userData.expenses.fixed).map(([k, cat]) => `
+              <div class="mb-4 p-4 border rounded">
+                <label class="block font-semibold mb-2">${k}</label>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <input type="number" step="0.01" value="${cat.budget}" onchange="userData.expenses.fixed['${k}'].budget = +this.value || 0; saveLocal(); render();" 
+                         class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white" placeholder="Budget">
+                  <input type="number" step="0.01" value="${cat.actual}" onchange="userData.expenses.fixed['${k}'].actual = +this.value || 0; saveLocal(); render();" 
+                         class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white" placeholder="Actual">
+                  <div class="text-sm text-gray-600">Diff: R ${ (cat.budget - cat.actual).toFixed(2) }</div>
+                </div>
+              </div>
+            `).join('')}
+            <button onclick="addExpenseCategory('fixed')" class="bg-indigo-600 text-white px-4 py-2 rounded">Add Fixed Category</button>
+          </div>
+          <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+            <h3 class="text-2xl font-bold mb-4">Variable Expenses (Total: R ${variableTotal.toFixed(2)})</h3>
+            ${Object.entries(userData.expenses.variable).map(([k, cat]) => `
+              <div class="mb-4 p-4 border rounded">
+                <label class="block font-semibold mb-2">${k}</label>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <input type="number" step="0.01" value="${cat.budget}" onchange="userData.expenses.variable['${k}'].budget = +this.value || 0; saveLocal(); render();" 
+                         class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white" placeholder="Budget">
+                  <input type="number" step="0.01" value="${cat.actual}" onchange="userData.expenses.variable['${k}'].actual = +this.value || 0; saveLocal(); render();" 
+                         class="border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white" placeholder="Actual">
+                  <div class="text-sm text-gray-600">Diff: R ${ (cat.budget - cat.actual).toFixed(2) }</div>
+                </div>
+              </div>
+            `).join('')}
+            <button onclick="addExpenseCategory('variable')" class="bg-indigo-600 text-white px-4 py-2 rounded">Add Variable Category</button>
+          </div>
+        </div>`;
+    }
+
+    window.addExpenseCategory = (type) => {
+      const name = prompt(`New ${type} category name:`);
+      if (name) {
+        userData.expenses[type][name.toLowerCase()] = { budget: 0, actual: 0 };
+        saveLocal();
+        render();
+      }
+    };
+
+    function savingsTab() {
+      const progress = (userData.savings.actual / userData.savings.target) * 100;
+      return `
+        <h2 class="text-3xl font-bold mb-6">Savings Tracker</h2>
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow max-w-md">
+          <label class="block font-semibold mb-2">Monthly Target</label>
+          <input type="number" step="0.01" value="${userData.savings.target}" onchange="userData.savings.target = +this.value || 0; saveLocal(); render();" 
+                 class="w-full border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white mb-4">
+          <label class="block font-semibold mb-2">Actual This Month</label>
+          <input type="number" step="0.01" value="${userData.savings.actual}" onchange="userData.savings.actual = +this.value || 0; saveLocal(); render();" 
+                 class="w-full border border-gray-300 dark:border-gray-600 rounded px-3 py-2 text-black bg-white mb-4">
+          <div class="w-full bg-gray-200 rounded-full h-4">
+            <div class="bg-blue-600 h-4 rounded-full transition-all" style="width: ${Math.min(progress, 100)}%"></div>
+          </div>
+          <div class="text-lg font-bold mt-2">Progress: ${progress.toFixed(1)}% (R ${userData.savings.actual.toFixed(2)} / R ${userData.savings.target.toFixed(2)})</div>
+        </div>
+        <div class="mt-6 bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+          <h3 class="text-xl font-bold mb-4">Savings Categories</h3>
+          ${userData.savings.categories.map((cat, i) => `
+            <div class="mb-4 p-4 border rounded flex justify-between items-center">
+              <span>${cat.name}</span>
+              <input type="number" step="0.01" value="${cat.amount}" onchange="userData.savings.categories[${i}].amount = +this.value || 0; saveLocal(); render();" 
+                     class="w-24 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-black bg-white">
+            </div>
+          `).join('') || '<p class="text-gray-500">No categories yet.</p>'}
+          <button onclick="addSavingsCategory()" class="bg-indigo-600 text-white px-4 py-2 rounded">Add Category</button>
+        </div>`;
+    }
+
+    window.addSavingsCategory = () => {
+      const name = prompt('New savings category name:');
+      if (name) {
+        userData.savings.categories.push({ name, amount: 0 });
+        saveLocal();
+        render();
+      }
+    };
+
     function reportsTab() {
       return `<h2 class="text-3xl font-bold mb-6">Reports</h2>
-        <canvas id="incomeChart" height="300"></canvas>
-        <canvas id="pieChart" class="mt-8" height="300"></canvas>`;
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+            <h3 class="text-xl font-bold mb-4">Income Breakdown</h3>
+            <canvas id="incomeChart" height="200"></canvas>
+          </div>
+          <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow">
+            <h3 class="text-xl font-bold mb-4">Expense Pie</h3>
+            <canvas id="pieChart" height="200"></canvas>
+          </div>
+        </div>`;
     }
+
     function settingsTab() {
+      const connected = gapi.client.getToken() ? 'Connected' : 'Not Connected';
       return `<h2 class="text-3xl font-bold mb-6">Settings</h2>
-        <button onclick="tokenClient.requestAccessToken()" class="bg-blue-600 text-white px-6 py-3 rounded">Connect Google Drive (Sync)</button>
-        <p class="mt-4">Status: ${gapi.client.getToken() ? 'Connected' : 'Not connected'}</p>`;
+        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow max-w-md">
+          <button onclick="tokenClient.requestAccessToken({prompt: ''})" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded mb-4">Connect Google Drive</button>
+          <p id="status">Drive Status: ${connected}</p>
+          <label class="block mt-4">
+            <input type="checkbox" id="darkMode" ${document.documentElement.classList.contains('dark') ? 'checked' : ''} onchange="document.documentElement.classList.toggle('dark', this.checked)">
+            Dark Mode
+          </label>
+        </div>`;
     }
 
     function drawCharts() {
-      new Chart(document.getElementById('incomeChart'), {
+      // Income Bar
+      const incomeCtx = document.getElementById('incomeChart')?.getContext('2d');
+      if (incomeCtx) new Chart(incomeCtx, {
         type: 'bar',
-        data: { labels: months, datasets: [{ label: 'Income', data: months.map(()=>50000+Math.random()*20000), backgroundColor: '#10b981' }] }
+        data: {
+          labels: Object.keys(userData.income),
+          datasets: [{ label: 'Income', data: Object.values(userData.income), backgroundColor: '#10b981' }]
+        },
+        options: { scales: { y: { beginAtZero: true } } }
       });
+
+      // Expense Pie
+      const pieCtx = document.getElementById('pieChart')?.getContext('2d');
+      if (pieCtx) {
+        const expData = [...Object.values(userData.expenses.fixed), ...Object.values(userData.expenses.variable)].map(cat => cat.actual);
+        const labels = [...Object.keys(userData.expenses.fixed), ...Object.keys(userData.expenses.variable)];
+        new Chart(pieCtx, {
+          type: 'pie',
+          data: { labels, datasets: [{ data: expData, backgroundColor: ['#ef4444', '#f59e0b', '#10b981', '#3b82f6'] }] }
+        });
+      }
     }
 
-    function saveAndRender() { render(); }
-
-    // Load Google APIs
-    const script1 = document.createElement('script');
-    script1.src = 'https://apis.google.com/js/api.js';
-    script1.onload = gapiLoad;
-    document.head.appendChild(script1);
-
-    const script2 = document.createElement('script');
-    script2.src = 'https://accounts.google.com/gsi/client';
-    script2.onload = gisLoad;
-    document.head.appendChild(script2);
-
+    // Init
+    gapiLoad();
+    gisLoad();
+    render();
   </script>
 </body>
 </html>
